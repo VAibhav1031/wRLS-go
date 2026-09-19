@@ -8,17 +8,24 @@ import (
 	"time"
 
 	"github.com/VAibhav1031/wRLS-go/handler"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
 
 // This project aim is for the particular feature testing not the real world/production  one
 
-func MuxServerHandler() *http.ServeMux {
+func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /orders", handler.HandleOrders)
-	mux.HandleFunc("GET /invoice/{invoice_id}", handler.HandleGInvoiceShadow)
-	mux.HandleFunc("GET /invoice", handler.HandleGInvoiceRLS)
+	auth_tracker := handler.NewAuthTracker()
+	db_pool := handler.NewPooler(pool)
+	new_handler := handler.NewHandler(auth_tracker, db_pool)
+
+	mux.HandleFunc("POST /register", db_pool.HandleRegister)
+	mux.HandleFunc("POST /login", new_handler.HandleLogin)
+	mux.HandleFunc("POST /orders", db_pool.HandleOrders)
+	mux.HandleFunc("GET /invoice/{invoice_id}", db_pool.HandleGInvoiceShadow)
+	mux.HandleFunc("GET /invoice", db_pool.HandleGInvoiceRLS)
 	return mux
 }
 
@@ -44,7 +51,7 @@ func main() {
 		log.Println("DB!! , ALL SET ")
 	}
 
-	mux := MuxServerHandler()
+	mux := MuxServerHandler(pool)
 	server := &http.Server{
 		Addr:           ":9895",
 		Handler:        mux,

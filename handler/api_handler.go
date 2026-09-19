@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,13 +12,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
-	"golang.org/x/crypto/bcrypt"
-
-	"github.com/golang-jwt/jwt/v5"
-	"github.com/patrickmn/go-cache"
 )
 
-var scrt_key string
+var scrt_key []byte
 var blockedTime = 15 * time.Minute
 var maxAttempts = 5
 
@@ -29,9 +24,9 @@ func init() {
 		log.Println("No .env file found, using system enviromentt ..")
 		return
 	}
-	scrt_key := os.Getenv("SECRET_KEY")
+	scrt_key := []byte(os.Getenv("SECRET_KEY"))
 
-	if scrt_key == "" {
+	if scrt_key == nil {
 		log.Println("No Secret_key is there brother..")
 		return
 	}
@@ -41,26 +36,20 @@ func init() {
 
 // before that we need to make sure of the post request smoothly
 
-type AuthTracker struct {
-	store *cache.Cache
+type OrderDet struct {
+	ProductName string  `json:"product_name"`
+	Quantity    int     `json:"quantity"`
+	Price       float32 `json:"price"`
 }
 
-type OrderDet struct {
-	ProductName string `json:"product_name"`
-	Quantity    int    `json:"quantity"`
-	Price       int    `json:"price"`
+type OrderDetList struct {
+	OrderList []OrderDet `json:"order_list"`
 }
 
 type register struct {
 	Username  string `json:"username"`
 	Email     string `json:"email"`
 	Passsword string `json:"password"`
-}
-
-type Response struct {
-	Code       string `json:"code"`
-	StatusCode int    `json:"status_code"`
-	Message    string `json:"message"`
 }
 
 type DBPooler struct {
@@ -73,11 +62,7 @@ type handler struct {
 }
 
 // creation .....
-func NewAuthTracker() *AuthTracker {
-	return &AuthTracker{
-		store: cache.New(blockedTime, 30*time.Second),
-	}
-}
+
 func NewPooler(pool *pgxpool.Pool) *DBPooler {
 
 	return &DBPooler{dbPool: pool}
@@ -102,14 +87,15 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	var user_det register
 	err := json.NewDecoder(r.Body).Decode(&user_det)
 	if err != nil {
-		log.Println("")
+		log.Println("JSON Decoder Error : %v", err)
+		internalServerError(w, "JSON Decoding Problem")
 		return
 	}
 
 	//basic-checks
 
 	if user_det.Username == "" || len(user_det.Username) < 4 {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Username ")
+		ret_json := response("BAD_REQUEST", 400, "Invalid Username ")
 		if ret_json == nil {
 			return
 		}
@@ -119,7 +105,7 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		log.Println("Invalid Username")
 	}
 	if user_det.Passsword == "" || len(user_det.Passsword) < 8 {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Password, Password  must be atleast 8 character and mix of Upper_case and lower_case Char")
+		ret_json := response("BAD_REQUEST", 400, "Invalid Password, Password  must be atleast 8 character and mix of Upper_case and lower_case Char")
 		if ret_json == nil {
 			return
 		}
@@ -131,7 +117,7 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if user_det.Email == "" {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Email")
+		ret_json := response("BAD_REQUEST", 400, "Invalid Email")
 		if ret_json == nil {
 			return
 		}
@@ -141,23 +127,25 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		log.Println("Invalid Email")
 	}
 
-	hashed_password, err := hashPassword(user_det.Passsword)
+	hashedPassword, err := hashPassword(user_det.Passsword)
 	if err != nil {
 		log.Printf("Error in hashing", err)
+		internalServerError(w, "")
 		return
 	}
 
-	query := `INSERT into users (username, email, password) VALUES ($1, $2, $3)`
-	cmd_tag, err := db.dbPool.Exec(context.Background(), query, user_det.Username, user_det.Email, hashed_password)
+	query := `INSERT into users (username, email, hashed_password) VALUES ($1, $2, $3)`
+	cmd_tag, err := db.dbPool.Exec(context.Background(), query, user_det.Username, user_det.Email, hashedPassword)
 	if err != nil || cmd_tag.RowsAffected() == 0 {
 		log.Printf("Insertion Failed", err)
+		internalServerError(w, "")
 		return
 	}
 
-	ret_json := response("ACCEPTED", 200, "DONE")
+	ret_json := response("Ok", 201, "DONE")
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusCreated)
 	w.Write(ret_json)
 }
 
@@ -171,14 +159,15 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	var user_det register
 	err := json.NewDecoder(r.Body).Decode(&user_det)
 	if err != nil {
-		log.Println("Marshalling Error : ", err)
+		log.Println("JSON Decoder Error : ", err)
+		internalServerError(w, "JSON Decoding Problem")
 		return
 	}
 
 	//basic-checks
 	// return of bad REQuest
 	if user_det.Username == "" || len(user_det.Username) < 4 {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Username")
+		ret_json := response("BAD_REQUEST", 400, "Invalid Username")
 		if ret_json == nil {
 			return
 		}
@@ -190,7 +179,7 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user_det.Passsword == "" || len(user_det.Passsword) < 8 {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Password")
+		ret_json := response("BAD_REQUEST", 400, "Invalid Password")
 		if ret_json == nil {
 			return
 		}
@@ -202,57 +191,45 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if user_det.Email == "" {
-		ret_json := response("BAD_REQUEST", 502, "Invalid Email")
-		if ret_json == nil {
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write(ret_json)
-		log.Println("Invalid Email")
-		return
-	}
-
 	if h.at.isBlocked(user_det.Username) {
 		/// you are blocked please try again later..
 		ret_json := response("TOO_MANY_REQUEST", 429, "User is Blocked...")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write(ret_json)
 
 		return
 	}
 
-	query_string := `SELECT user_id, password from users where username=($1) and email=($2)`
+	query_string := `SELECT user_id, hashed_password from users where username=($1) or  email=($2)`
 
-	var hashed_password string
+	var hashedPassword string
 	var user_id int
-	err = h.db.dbPool.QueryRow(context.Background(), query_string, user_det.Username, user_det.Passsword).Scan(&hashed_password, &user_id)
+	err = h.db.dbPool.QueryRow(context.Background(), query_string, user_det.Username, user_det.Passsword).Scan(&user_id, &hashedPassword)
 	if err != nil {
 		log.Printf("Select Query Error", err)
 		// most probably user doesnt exist
-		ret_json := response("USERNAME_ERROR", 404, "This Username doesnt Exist!!")
+		ret_json := response("USERNAME_ERROR", 401, "This Username doesnt Exist!!")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(ret_json)
 		return
 	}
 
-	if !checkPasswordHash(hashed_password, user_det.Passsword) {
+	if !checkPasswordHash(user_det.Passsword, hashedPassword) {
 
 		nBlocked := h.at.trackFailedAttempts(user_det.Username)
 
 		if nBlocked {
-			ret_json := response("BLOCKED", 404, "User is blocked for Many Incorrect Attempts")
+			ret_json := response("BLOCKED", 401, "User is blocked for Many Incorrect Attempts")
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
+			w.WriteHeader(http.StatusUnauthorized)
 			w.Write(ret_json)
 			return
 		} else {
-			ret_json := response("INCORRECT_PASSWORD", 404, "Password is incorrect, Be careful :)")
+			ret_json := response("INCORRECT_PASSWORD", 401, "Password is incorrect, Be careful :)")
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
+			w.WriteHeader(http.StatusUnauthorized)
 			w.Write(ret_json)
 			return
 		}
@@ -265,10 +242,14 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// return the jwt token as the ..
 	token := jwtCreation(user_id)
+	if token == "" {
+		log.Println("Token Creation Failed..")
+		return
+	}
 
 	ret_json := response("AUTH_TOKEN", 200, token)
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusOK)
 	w.Write(ret_json)
 	return
 }
@@ -276,21 +257,23 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 // every other function first check is just the validation of the auth token which is just for the integrity
 func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
-	token := r.Header.Get("Authorization")
+	auth_token := r.Header.Get("Authorization")
 
-	if token == "" || !strings.HasPrefix(token, "Bearer") {
+	if auth_token == "" || !strings.HasPrefix(auth_token, "Bearer") {
 		// AUTH FAILED, EMPTY TOKEN
-		resp := response("AUTH_TOKEN_EMPTY", 404, "Authorization token is empty")
+		resp := response("AUTH_TOKEN_INVALID", 401, "Invalid Authorization Token..")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 	}
+
+	token := strings.TrimPrefix(auth_token, "Bearer ")
 	user_id, verified := jwtVerifcation(token)
 	if user_id == -1 && !verified {
-		resp := response("AUTH_TOKEN_EXPIRED", 404, "Authorization token is Expired or Invalid")
+		resp := response("AUTH_TOKEN_EXPIRED", 401, "Authorization token is Expired or Invalid")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 		//EXPIRED
@@ -298,11 +281,12 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det []OrderDet
+	var order_det OrderDetList
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		fmt.Println("json NewDecoder", err)
+		internalServerError(w, "Invalid Json Body")
+		log.Println("JSON NewDecoder  Error: ", err)
 		return
 	}
 
@@ -312,10 +296,10 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det {
+	for _, order := range order_det.OrderList {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
-			ret_json := response("BAD_REQUEST", 502, "Incorrect Quantity")
+			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
 			if ret_json == nil {
 				return
 			}
@@ -325,7 +309,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if order.Price < 0 {
-			ret_json := response("BAD_REQUEST", 502, "Invalid Price Value")
+			ret_json := response("BAD_REQUEST", 400, "Invalid Price Value")
 			if ret_json == nil {
 				return
 			}
@@ -338,40 +322,45 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 	// normal
 	// call to the db save the detail related to the thingand have the invoice_id , generated by the  db saved in the redis without TTL
 
-	invoice_id := db.invoiceDbCommit(context.Background(), order_det, user_id)
+	invoice_id := db.invoiceDbCommit(context.Background(), order_det.OrderList, int(user_id))
 	if invoice_id == "" { // insertion Failure mostly
+		log.Println("Insertion Failure [Orders]")
+		internalServerError(w, "")
 		return
 	}
 
-	invoice_id_rls := db.invoiceDbCommit(context.Background(), order_det, user_id)
-	if invoice_id_rls == "" {
+	invoice_id_rls := db.invoiceDbCommitRLS(context.Background(), order_det.OrderList, int(user_id))
+	if invoice_id_rls == -1 {
+		log.Println("Insertion Failure [Orders_RLS] ")
+		internalServerError(w, "")
 		return
 	}
 
-	resp := response("ACCEPTED", 201, "Request Accepted")
+	resp := response("OK", 200, "Request Accepted")
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
+	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
 }
 
 func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request) {
 	// now this is basically the GET request with mapping
-	token := r.Header.Get("Authorization")
+	auth_token := r.Header.Get("Authorization")
 
-	if token == "" || !strings.HasPrefix(token, "Bearer") {
+	if auth_token == "" || !strings.HasPrefix(auth_token, "Bearer") {
 		// AUTH FAILED, EMPTY TOKEN
-		resp := response("AUTH_TOKEN_EMPTY", 404, "Authorization token is empty")
+		resp := response("AUTH_TOKEN_INVALID", 401, "Invalid Authorization Token..")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 	}
 
+	token := strings.TrimPrefix(auth_token, "Bearer ")
 	user_id, verified := jwtVerifcation(token)
 	if user_id == -1 && !verified {
-		resp := response("AUTH_TOKEN_EXPIRED", 404, "Authorization token is Expired or Invalid")
+		resp := response("AUTH_TOKEN_EXPIRED", 401, "Authorization token is Expired or Invalid")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 		//EXPIRED
@@ -385,9 +374,9 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 
 	query_str := `SELECT  product_name, quantity , price, public_id from orders where public_invoice_id=$1 and user_id=$2`
 	rows, err := db.dbPool.Query(context.Background(), query_str, p_id, user_id)
-
 	if err != nil {
-		log.Printf("ERROR querying ")
+		log.Printf("ERROR querying order table: %v", err)
+		internalServerError(w, "")
 		return
 	}
 
@@ -403,22 +392,25 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 
 		err := rows.Scan(&product_name, &quantity, &price)
 		if err != nil {
-			log.Printf("Error In Fetching detail ", err)
+			log.Printf("Error In Fetching detail : %v", err)
+			internalServerError(w, "")
 			return
 		}
 
-		orders = append(orders, OrderDet{ProductName: product_name, Quantity: quantity, Price: int(price)})
+		orders = append(orders, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
 
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("Error in Scannig of the order Details", err)
+		log.Printf("Error in Scannig of the order Details : %v", err)
+		internalServerError(w, "")
 		return
 	}
 
 	re, err := json.Marshal(orders)
 	if err != nil {
 		log.Printf("Error in Marshalling", err)
+		internalServerError(w, "Marshalling Error")
 		return
 	}
 
@@ -429,22 +421,23 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 }
 
 func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
-	token := r.Header.Get("Authorization")
+	auth_token := r.Header.Get("Authorization")
 
-	if token == "" || !strings.HasPrefix(token, "Bearer") {
+	if auth_token == "" || !strings.HasPrefix(auth_token, "Bearer") {
 		// AUTH FAILED, EMPTY TOKEN
-		resp := response("AUTH_TOKEN_EMPTY", 404, "Authorization token is empty")
+		resp := response("AUTH_TOKEN_INVALID", 401, "Invalid Authorization Token..")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 	}
 
+	token := strings.TrimPrefix(auth_token, "Bearer ")
 	user_id, verified := jwtVerifcation(token)
 	if user_id == -1 && !verified {
-		resp := response("AUTH_TOKEN_EXPIRED", 404, "Authorization token is Expired or Invalid")
+		resp := response("AUTH_TOKEN_EXPIRED", 401, "Authorization token is Expired or Invalid")
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
+		w.WriteHeader(http.StatusUnauthorized)
 		w.Write(resp)
 		return
 		//EXPIRED
@@ -454,203 +447,59 @@ func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
 	// you have to use the query parameter
 
 	queryParams := r.URL.Query()
-
 	invoice_id := queryParams.Get("invoice_id")
-	var orders []OrderDet
+
+	// slice of OrderDet
+	var orders_rls []OrderDet
+
+	bt := &pgx.Batch{}
+	bt.Queue(`SET LOCAL app.current_invoice_id=$1`, invoice_id)
 	// we just need to the select the required id
+	bt.Queue(`SELECT  product_name, quantity , price, public_id from orders_rls where public_invoice_id=$1 and user_id=$2`, invoice_id, user_id)
 
-	query_str := `SELECT  product_name, quantity , price, public_id from orders_rls where public_invoice_id=$1 and user_id=$2`
-	rows, err := db.dbPool.Query(context.Background(), query_str, invoice_id, user_id)
+	// send the whole batch...
+	results := db.dbPool.SendBatch(context.Background(), bt)
+	defer results.Close()
 
+	_, err := results.Exec()
 	if err != nil {
 		log.Printf("ERROR querying ")
+		internalServerError(w, "")
 		return
 	}
 
+	rows, err := results.Query() // Query All rows
 	defer rows.Close()
 
 	for rows.Next() {
-
 		var (
 			product_name string
 			quantity     int
 			price        float32
 		)
-
 		err := rows.Scan(&product_name, &quantity, &price)
 		if err != nil {
 			log.Printf("Error In Fetching detail ", err)
+			internalServerError(w, "")
 			return
 		}
-
-		orders = append(orders, OrderDet{ProductName: product_name, Quantity: quantity, Price: int(price)})
+		orders_rls = append(orders_rls, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
 
 	}
-
 	if err := rows.Err(); err != nil {
 		log.Printf("Error in Scannig of the order Details", err)
+		internalServerError(w, "")
 		return
 	}
 
-	re, err := json.Marshal(orders)
+	re, err := json.Marshal(orders_rls)
 	if err != nil {
 		log.Printf("Error in Marshalling", err)
+		internalServerError(w, "Marshalling Error")
 		return
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(re)
-
-}
-
-func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_id int) string {
-
-	bt := &pgx.Batch{}
-	for _, order := range orders {
-
-		bt.Queue(`INSERT into orders (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
-	}
-
-	bt.Queue(`SELECT public_invoice_id from orders where user_id=($1)`, user_id)
-
-	results := w.dbPool.SendBatch(ctx, bt)
-	defer results.Close()
-
-	for i := 0; i < len(orders); i++ {
-		_, err := results.Exec()
-		if err != nil {
-			log.Printf("[InvoiceDBCommit]: Insertion Failed :", err)
-			return ""
-		}
-	}
-
-	var public_invoice_id string
-	err := results.QueryRow().Scan(&public_invoice_id)
-	if err != nil {
-		log.Printf("[InvoiceDBCommit]: Selection Query Failed..")
-		return ""
-	}
-
-	return public_invoice_id
-}
-
-func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int) string {
-
-	bt := &pgx.Batch{}
-	for _, order := range orders {
-
-		bt.Queue(`INSERT into orders_rls (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
-	}
-
-	bt.Queue(`SELECT invoice_id from orders where user_id=($1)`, user_id)
-
-	results := w.dbPool.SendBatch(ctx, bt)
-	defer results.Close()
-
-	for i := 0; i < len(orders); i++ {
-		_, err := results.Exec()
-		if err != nil {
-			log.Printf("Insertion Failed", err)
-			return ""
-		}
-	}
-
-	var invoice_id string
-	err := results.QueryRow().Scan(&invoice_id)
-	if err != nil {
-		log.Printf("Selection Query Failed..")
-		return ""
-	}
-
-	return invoice_id
-}
-
-func response(code string, statuscode int, msg string) []byte {
-	resp := Response{
-		Code:       code,
-		StatusCode: statuscode,
-		Message:    msg,
-	}
-	u, err := json.Marshal(resp)
-	if err != nil {
-		log.Printf("Marshalling error: %v", err)
-		return []byte{}
-	}
-	return u
-}
-
-func hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", err
-	}
-	return string(bytes), nil
-}
-
-func checkPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
-}
-
-func jwtCreation(user_id int) string {
-
-	claims := jwt.MapClaims{
-		"userid": user_id,
-		"exp":    time.Now().Add(time.Minute * 10).Unix(),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-	tokenString, err := token.SignedString(scrt_key)
-
-	if err != nil {
-		log.Printf("Failed to generate the token :", err)
-	}
-	return tokenString
-}
-
-func jwtVerifcation(tkn_str string) (int, bool) {
-
-	token, err := jwt.Parse(tkn_str, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Unexpected Signing Method", t.Header["alg"])
-		}
-		return scrt_key, nil
-	})
-
-	if err != nil || !token.Valid {
-		log.Printf("Token is Expired or Invalid")
-		return -1, false
-	}
-
-	if claims, ok := token.Claims.(jwt.MapClaims); ok {
-		return claims["user_id"].(int), true
-	}
-
-	return -1, false
-}
-
-func (at *AuthTracker) trackFailedAttempts(username string) bool {
-	err := at.store.Increment(username, 1)
-	if err != nil {
-		at.store.Set(username, 1, cache.DefaultExpiration)
-		return false
-	}
-
-	if attempts, found := at.store.Get(username); found {
-		if attempts.(int) >= maxAttempts {
-			at.store.Set(username, attempts.(int), blockedTime)
-			return true
-		}
-	}
-	return false
-}
-
-func (at *AuthTracker) isBlocked(username string) bool {
-	if attempts, found := at.store.Get(username); found {
-
-		return attempts.(int) >= maxAttempts
-	}
-	return false
 
 }

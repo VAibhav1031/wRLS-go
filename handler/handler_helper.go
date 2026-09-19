@@ -3,14 +3,17 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"log"
+	"net/http"
+
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
-	"log"
 
 	"fmt"
+	"time"
+
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/patrickmn/go-cache"
-	"time"
 )
 
 type Response struct {
@@ -30,19 +33,20 @@ func NewAuthTracker() *AuthTracker {
 func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_id int) string {
 
 	bt := &pgx.Batch{}
+
 	for _, order := range orders {
 
 		bt.Queue(`INSERT into orders (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
 	}
-
+	fmt.Println(user_id)
 	bt.Queue(`SELECT public_invoice_id from orders where user_id=($1)`, user_id)
 
 	results := w.dbPool.SendBatch(ctx, bt)
 	defer results.Close()
 
 	for i := 0; i < len(orders); i++ {
-		_, err := results.Exec()
-		if err != nil {
+		insertTag, err := results.Exec()
+		if err != nil || !insertTag.Insert() {
 			log.Printf("[InvoiceDBCommit]: Insertion Failed :", err)
 			return ""
 		}
@@ -51,39 +55,41 @@ func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_
 	var public_invoice_id string
 	err := results.QueryRow().Scan(&public_invoice_id)
 	if err != nil {
-		log.Printf("[InvoiceDBCommit]: Selection Query Failed..")
+		log.Printf("[InvoiceDBCommit]: Selection Query Failed..", err)
 		return ""
 	}
 
 	return public_invoice_id
 }
 
-func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int) string {
+func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int) int {
 
 	bt := &pgx.Batch{}
+
+	// setting the role as the app_user for this
 	for _, order := range orders {
 
 		bt.Queue(`INSERT into orders_rls (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
 	}
 
-	bt.Queue(`SELECT invoice_id from orders where user_id=($1)`, user_id)
+	bt.Queue(`SELECT invoice_id from orders_rls where user_id=($1)`, user_id)
 
 	results := w.dbPool.SendBatch(ctx, bt)
 	defer results.Close()
 
 	for i := 0; i < len(orders); i++ {
-		_, err := results.Exec()
-		if err != nil {
-			log.Printf("Insertion Failed", err)
-			return ""
+		insertTag, err := results.Exec()
+		if err != nil || !insertTag.Insert() {
+			log.Printf("[InvoiceDBCommit-RLS]: Insertion Failed", err)
+			return -1
 		}
 	}
 
-	var invoice_id string
+	var invoice_id int
 	err := results.QueryRow().Scan(&invoice_id)
 	if err != nil {
-		log.Printf("Selection Query Failed..")
-		return ""
+		log.Printf("[InvoiceDBCommit-RLS]: Selection Query Failed..", err)
+		return -1
 	}
 
 	return invoice_id
@@ -119,20 +125,21 @@ func checkPasswordHash(password, hash string) bool {
 func jwtCreation(user_id int) string {
 
 	claims := jwt.MapClaims{
-		"userid": user_id,
-		"exp":    time.Now().Add(time.Minute * 10).Unix(),
+		"user_id": user_id,
+		"exp":     time.Now().Add(time.Minute * 10).Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	tokenString, err := token.SignedString(scrt_key)
 
-	if err != nil {
+	if err != nil || tokenString == "" {
 		log.Printf("Failed to generate the token :", err)
 	}
+
 	return tokenString
 }
 
-func jwtVerifcation(tkn_str string) (int, bool) {
+func jwtVerifcation(tkn_str string) (float64, bool) {
 
 	token, err := jwt.Parse(tkn_str, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -142,12 +149,14 @@ func jwtVerifcation(tkn_str string) (int, bool) {
 	})
 
 	if err != nil || !token.Valid {
-		log.Printf("Token is Expired or Invalid")
+
+		fmt.Println(token, token.Valid)
+		log.Printf("Token is Expired or Invalid", err)
 		return -1, false
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok {
-		return claims["user_id"].(int), true
+		return claims["user_id"].(float64), true
 	}
 
 	return -1, false
@@ -176,4 +185,12 @@ func (at *AuthTracker) isBlocked(username string) bool {
 	}
 	return false
 
+}
+
+func internalServerError(w http.ResponseWriter, message string) {
+
+	ret_json := response("INTERNAL_SERVER_ERROR", 500, message)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+	w.Write(ret_json)
 }
