@@ -12,7 +12,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// This project aim is for the particular feature testing not the real world/production  one
+// This project aim is for the particular feature testing (How they work with this and without this) not the real world/production  one
 
 func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 	mux := http.NewServeMux()
@@ -23,7 +23,8 @@ func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 
 	mux.HandleFunc("POST /register", db_pool.HandleRegister)
 	mux.HandleFunc("POST /login", new_handler.HandleLogin)
-	mux.HandleFunc("POST /orders", db_pool.HandleOrders)
+	mux.HandleFunc("POST /checkout", db_pool.HandleOrders)
+	mux.HandleFunc("POST /checkoutRLS", db_pool.HandleGInvoiceRLS)
 	mux.HandleFunc("GET /invoice/{invoice_id}", db_pool.HandleGInvoiceShadow)
 	mux.HandleFunc("GET /invoice", db_pool.HandleGInvoiceRLS)
 	return mux

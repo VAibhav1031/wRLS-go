@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
@@ -30,69 +32,68 @@ func NewAuthTracker() *AuthTracker {
 		store: cache.New(blockedTime, 30*time.Second),
 	}
 }
-func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_id int) string {
+func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_id int, publicInvoiceID uuid.UUID) error {
 
 	bt := &pgx.Batch{}
 
 	for _, order := range orders {
 
-		bt.Queue(`INSERT into orders (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
+		bt.Queue(`INSERT into orders (user_id, public_invoice_id, product_name, price, quantity) VALUES ($1,$2,$3,$4,$5)`, user_id, publicInvoiceID, order.ProductName, order.Price, order.Quantity)
 	}
-	fmt.Println(user_id)
-	bt.Queue(`SELECT public_invoice_id from orders where user_id=($1)`, user_id)
 
 	results := w.dbPool.SendBatch(ctx, bt)
 	defer results.Close()
 
-	for i := 0; i < len(orders); i++ {
+	for range orders {
 		insertTag, err := results.Exec()
-		if err != nil || !insertTag.Insert() {
+		if err != nil {
 			log.Printf("[InvoiceDBCommit]: Insertion Failed :", err)
-			return ""
+			return err
+		}
+		if insertTag.RowsAffected() != 1 {
+			log.Printf(
+				"[InvoiceDBCommit]: expected one inserted row, affected %d",
+				insertTag.RowsAffected(),
+			)
+			return fmt.Errorf("[InvoiceDBCommit]: No Rows Are Changed")
 		}
 	}
 
-	var public_invoice_id string
-	err := results.QueryRow().Scan(&public_invoice_id)
-	if err != nil {
-		log.Printf("[InvoiceDBCommit]: Selection Query Failed..", err)
-		return ""
-	}
+	return nil
 
-	return public_invoice_id
 }
 
-func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int) int {
+func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int, invoice_id int) error {
 
 	bt := &pgx.Batch{}
 
+	bt.Queue(`SET LOCAL app.current_invoice_id = $1`, invoice_id)
 	// setting the role as the app_user for this
 	for _, order := range orders {
 
-		bt.Queue(`INSERT into orders_rls (product_name, price, quantity) VALUES ($1,$2,$3)`, order.ProductName, order.Price, order.Quantity)
+		bt.Queue(`INSERT into orders (user_id, product_name, price, quantity) VALUES ($1,$2,$3,$4)`, user_id, order.ProductName, order.Price, order.Quantity)
 	}
-
-	bt.Queue(`SELECT invoice_id from orders_rls where user_id=($1)`, user_id)
 
 	results := w.dbPool.SendBatch(ctx, bt)
 	defer results.Close()
 
 	for i := 0; i < len(orders); i++ {
 		insertTag, err := results.Exec()
-		if err != nil || !insertTag.Insert() {
+		if err != nil {
 			log.Printf("[InvoiceDBCommit-RLS]: Insertion Failed", err)
-			return -1
+			return err
+		}
+		if insertTag.RowsAffected() != 1 {
+			log.Printf(
+				"[InvoiceDBCommit]: expected one inserted row, affected %d",
+				insertTag.RowsAffected(),
+			)
+
+			return fmt.Errorf("[InvoiceDBCommit]: No Rows are Affected ")
 		}
 	}
 
-	var invoice_id int
-	err := results.QueryRow().Scan(&invoice_id)
-	if err != nil {
-		log.Printf("[InvoiceDBCommit-RLS]: Selection Query Failed..", err)
-		return -1
-	}
-
-	return invoice_id
+	return nil
 }
 
 func response(code string, statuscode int, msg string) []byte {
@@ -185,6 +186,33 @@ func (at *AuthTracker) isBlocked(username string) bool {
 	}
 	return false
 
+}
+
+func JWTAuthCheck(w http.ResponseWriter, req *http.Request) (int, error) {
+
+	auth_token := req.Header.Get("Authorization")
+
+	if auth_token == "" || !strings.HasPrefix(auth_token, "Bearer") {
+		// AUTH FAILED, EMPTY TOKEN
+		resp := response("AUTH_TOKEN_INVALID", 401, "Invalid Authorization Token..")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(resp)
+		return -1, fmt.Errorf("Auth Token is Invalid")
+	}
+
+	token := strings.TrimPrefix(auth_token, "Bearer ")
+	user_id, verified := jwtVerifcation(token)
+	if user_id == -1 && !verified {
+		resp := response("AUTH_TOKEN_EXPIRED", 401, "Authorization token is Expired or Invalid")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write(resp)
+		return -1, fmt.Errorf("Auth Token is Expired..")
+		//EXPIRED
+	}
+
+	return int(user_id), nil
 }
 
 func internalServerError(w http.ResponseWriter, message string) {
