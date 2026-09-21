@@ -247,7 +247,7 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			w.Write(ret_json)
 			return
 		} else {
-			ret_json := response("INCORRECT_PASSWORD", 401, "Password is incorrect, Be careful :)")
+			ret_json := response("INVALID_CREDENTIALS", 401, "Invalid Credential , Be careful :)")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write(ret_json)
@@ -286,7 +286,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det SingleOrdersResponse
+	var order_det []OrderDet
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -301,7 +301,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det.Order {
+	for _, order := range order_det {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -327,7 +327,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	//creation of th uuid for the use, which can be more unique unguessable , and pack whole order in one invoice_id
 	public_invoice_id := uuid.New()
-	err = db.invoiceDbCommit(context.Background(), order_det.Order, int(user_id), public_invoice_id)
+	err = db.invoiceDbCommit(context.Background(), order_det, int(user_id), public_invoice_id)
 
 	if err != nil { // insertion Failure mostly
 		log.Println("Insertion Failure [Orders]")
@@ -351,7 +351,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det SingleOrdersResponse
+	var order_det []OrderDet
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -366,7 +366,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det.Order {
+	for _, order := range order_det {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -393,13 +393,13 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	// Getting the invoice_id of the orders_rls (which is beeing  the sequence  object start with 1000) and for every
 	// whole order bunch to get  the new  single invoice we are using this and allshit
 	var invoice_id int
-	query_str := `SELECT nextval(invoice_id_seq) `
+	query_str := `SELECT nextval(invoice_id_seq) ;`
 	err = db.dbPool.QueryRow(context.Background(), query_str).Scan(invoice_id)
 	if err != nil {
 		log.Printf("Querying 'invoice_id_seq' Failed: %v", err)
 	}
 
-	err = db.invoiceDbCommitRLS(context.Background(), order_det.Order, int(user_id), invoice_id)
+	err = db.invoiceDbCommitRLS(context.Background(), order_det, int(user_id), invoice_id)
 	if err != nil {
 		log.Println("Insertion Failure [Orders_RLS] ")
 		internalServerError(w, "")

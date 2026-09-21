@@ -24,9 +24,11 @@ func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 	mux.HandleFunc("POST /register", db_pool.HandleRegister)
 	mux.HandleFunc("POST /login", new_handler.HandleLogin)
 	mux.HandleFunc("POST /checkout", db_pool.HandleOrders)
-	mux.HandleFunc("POST /checkoutRLS", db_pool.HandleGInvoiceRLS)
+	mux.HandleFunc("POST /checkoutRLS", db_pool.HandleOrdersRLS)
 	mux.HandleFunc("GET /invoice/{invoice_id}", db_pool.HandleGInvoiceShadow)
 	mux.HandleFunc("GET /invoice", db_pool.HandleGInvoiceRLS)
+	mux.HandleFunc("GET /orders", db_pool.HandleGetAllOrders)
+	mux.HandleFunc("GET /orderRLS", db_pool.HandleGetAllOrdersRLS)
 	return mux
 }
 

@@ -8,7 +8,7 @@ SET search_path = experiment, public;
 
 -- create the Table users
 CREATE TABLE IF NOT EXISTS users (
-    user_id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY START WITH 100, 
+    user_id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY (START WITH 100), 
     username varchar(30) UNIQUE NOT NULL,
     email varchar(30) NOT NULL,
     hashed_password varchar(255)  NOT NULL
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS orders_rls (
 
 
 
-CREATE SEQUENCE IF NOT EXISTS invoice_id_seq START WITH 1000
+CREATE SEQUENCE IF NOT EXISTS invoice_id_seq START WITH 1000;
 
 
 -- Create the application role , does we use this application role for the user, login also  or only for the orders_rls 
@@ -85,7 +85,8 @@ USING(
     AND
     (
         NULLIF(current_setting('app.current_invoice_id',true),'') IS NULL
-        or invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT    
+        or invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT   
+    )
 )
 WITH CHECK (
     invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT
