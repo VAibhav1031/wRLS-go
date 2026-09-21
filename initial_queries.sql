@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS orders (
 CREATE TABLE IF NOT EXISTS orders_rls (
     order_id INT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
     user_id INT REFERENCES users(user_id) ON DELETE CASCADE,
-    invoice_id INT NOT NULL,
+    invoice_id INT UNIQUE NOT NULL,
     product_name VARCHAR(50) NOT NULL,
     price NUMERIC(10,2) NOT NULL,
     quantity NUMERIC NOT NULL
@@ -80,8 +80,12 @@ ALTER TABLE orders_rls ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY orders_rls_policy on orders_rls FOR ALL  TO app_user 
 USING(
-    
-    invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT    
+   
+    user_id = NULLIF(current_setting('app.currrent_user_id',true),'')::INT
+    AND
+    (
+        NULLIF(current_setting('app.current_invoice_id',true),'') IS NULL
+        or invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT    
 )
 WITH CHECK (
     invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT

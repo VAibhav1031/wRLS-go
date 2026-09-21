@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,8 +43,26 @@ type OrderDet struct {
 	Price       float32 `json:"price"`
 }
 
-type OrderDetList struct {
-	OrderList []OrderDet `json:"order_list"`
+type SingleOrdersResponse struct {
+	InvoiceId   uuid.UUID  `json:"invoice_id"`
+	TotalAmount int        `json:"total_amount"`
+	Order       []OrderDet `json:"items"`
+}
+
+type SingleOrdersRlsResponse struct {
+	InvoiceId   int        `json:"invoice_id"`
+	TotalAmount int        `json:"total_amount "`
+	Order       []OrderDet `json:"items"`
+}
+
+type AllOrdersResponse struct {
+	Orders []SingleOrdersResponse `json:"orders"`
+	Count  int                    `json:"count"`
+}
+
+type AllOrdersRlsResponse struct {
+	Orders []SingleOrdersRlsResponse `json:"orders"`
+	Count  int                       `json:"count"`
 }
 
 type register struct {
@@ -134,8 +153,9 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
 	query := `INSERT into users (username, email, hashed_password) VALUES ($1, $2, $3)`
-	cmd_tag, err := db.dbPool.Exec(context.Background(), query, user_det.Username, user_det.Email, hashedPassword)
+	cmd_tag, err := db.dbPool.Exec(ctx, query, user_det.Username, user_det.Email, hashedPassword)
 	if err != nil || cmd_tag.RowsAffected() == 0 {
 		log.Printf("Insertion Failed", err)
 		internalServerError(w, "")
@@ -201,7 +221,7 @@ func (h *handler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	query_string := `SELECT user_id, hashed_password from users where username=($1) or  email=($2)`
+	query_string := `SELECT user_id, hashed_password from users where username=($1) or  email=($2);`
 
 	var hashedPassword string
 	var user_id int
@@ -266,7 +286,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det OrderDetList
+	var order_det SingleOrdersResponse
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -281,7 +301,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det.OrderList {
+	for _, order := range order_det.Order {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -307,7 +327,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	//creation of th uuid for the use, which can be more unique unguessable , and pack whole order in one invoice_id
 	public_invoice_id := uuid.New()
-	err = db.invoiceDbCommit(context.Background(), order_det.OrderList, int(user_id), public_invoice_id)
+	err = db.invoiceDbCommit(context.Background(), order_det.Order, int(user_id), public_invoice_id)
 
 	if err != nil { // insertion Failure mostly
 		log.Println("Insertion Failure [Orders]")
@@ -331,7 +351,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det OrderDetList
+	var order_det SingleOrdersResponse
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -346,7 +366,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det.OrderList {
+	for _, order := range order_det.Order {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -379,7 +399,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Querying 'invoice_id_seq' Failed: %v", err)
 	}
 
-	err = db.invoiceDbCommitRLS(context.Background(), order_det.OrderList, int(user_id), invoice_id)
+	err = db.invoiceDbCommitRLS(context.Background(), order_det.Order, int(user_id), invoice_id)
 	if err != nil {
 		log.Println("Insertion Failure [Orders_RLS] ")
 		internalServerError(w, "")
@@ -388,6 +408,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 
 	resp := response("OK", 200, "Request Accepted")
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("url", "")
 	w.WriteHeader(http.StatusOK)
 	w.Write(resp)
 }
@@ -402,12 +423,33 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 
 	// ---- ------- ------ ------
 
+	// we need this because we will send the public_invoice_id to them which
+	// is the random and cant be guess and nice to be good to prevent IDOR
+
 	p_id := r.PathValue("public_invoice_id")
-	var orders []OrderDet
+	var OneOrder SingleOrdersResponse
+
+	public_invoice_uuid, err := uuid.Parse(p_id)
+	if err != nil {
+		log.Printf("Error in Parsing uuid: %v", err)
+		re := response("NOT_FOUND", 404, "Unable to find the particular Service")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write(re)
+		return
+		//
+	}
+
 	// we just need to the select the required id
 
-	query_str := `SELECT  product_name, quantity , price, public_id from orders where public_invoice_id=$1 and user_id=$2`
-	rows, err := db.dbPool.Query(context.Background(), query_str, p_id, user_id)
+	query_str := `SELECT  
+		product_name, 
+		quantity ,
+		price,
+		(SELECT sum(price * quantity)  from orders) as total_amount from orders 
+		where public_invoice_id=$1 and user_id=$2;`
+
+	rows, err := db.dbPool.Query(context.Background(), query_str, public_invoice_uuid, user_id)
 	if err != nil {
 		log.Printf("ERROR querying order table: %v", err)
 		internalServerError(w, "")
@@ -416,6 +458,9 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 
 	defer rows.Close()
 
+	OneOrder.InvoiceId = public_invoice_uuid
+
+	// we need the  invoice_id , total_amount,
 	for rows.Next() {
 
 		var (
@@ -424,24 +469,24 @@ func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request)
 			price        float32
 		)
 
-		err := rows.Scan(&product_name, &quantity, &price)
+		err := rows.Scan(&product_name, &quantity, &price, &OneOrder.TotalAmount)
 		if err != nil {
 			log.Printf("Error In Fetching detail : %v", err)
 			internalServerError(w, "")
 			return
 		}
 
-		orders = append(orders, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
+		OneOrder.Order = append(OneOrder.Order, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
 
 	}
 
 	if err := rows.Err(); err != nil {
-		log.Printf("Error in Scannig of the order Details : %v", err)
+		log.Printf("Error in Scanning of the order Details : %v", err)
 		internalServerError(w, "")
 		return
 	}
 
-	re, err := json.Marshal(orders)
+	re, err := json.Marshal(OneOrder)
 	if err != nil {
 		log.Printf("Error in Marshalling", err)
 		internalServerError(w, "Marshalling Error")
@@ -466,15 +511,29 @@ func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
 	// you have to use the query parameter
 
 	queryParams := r.URL.Query()
-	invoice_id := queryParams.Get("invoice_id")
+	invoice_id, err := strconv.Atoi(queryParams.Get("invoice_id"))
+	if err != nil {
+		log.Printf("Provided Invoice id in the query_paramater : %v", err)
+		internalServerError(w, "")
+		return
+	}
 
 	// slice of OrderDet
-	var orders_rls []OrderDet
+	var OneOrdersRLS SingleOrdersRlsResponse
 
 	bt := &pgx.Batch{}
 	bt.Queue(`SET LOCAL app.current_invoice_id=$1`, invoice_id)
 	// we just need to the select the required id
-	bt.Queue(`SELECT  product_name, quantity , price, public_id from orders_rls where public_invoice_id=$1 and user_id=$2`, invoice_id, user_id)
+
+	query_str := `SELECT  
+		product_name,
+		quantity ,
+		price, 
+		(SELECT sum(price * quantity) from orders) as total_amount
+		from orders_rls 
+		where invoice_id=$1 and user_id=$2;`
+
+	bt.Queue(query_str, invoice_id, user_id)
 
 	// send the whole batch...
 	results := db.dbPool.SendBatch(context.Background(), bt)
@@ -490,19 +549,20 @@ func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
 	rows, err := results.Query() // Query All rows
 	defer rows.Close()
 
+	OneOrdersRLS.InvoiceId = invoice_id
 	for rows.Next() {
 		var (
 			product_name string
 			quantity     int
 			price        float32
 		)
-		err := rows.Scan(&product_name, &quantity, &price)
+		err := rows.Scan(&product_name, &quantity, &price, &OneOrdersRLS.TotalAmount)
 		if err != nil {
-			log.Printf("Error In Fetching detail ", err)
+			log.Printf("Error In Scanning detail ", err)
 			internalServerError(w, "")
 			return
 		}
-		orders_rls = append(orders_rls, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
+		OneOrdersRLS.Order = append(OneOrdersRLS.Order, OrderDet{ProductName: product_name, Quantity: quantity, Price: price})
 
 	}
 	if err := rows.Err(); err != nil {
@@ -511,7 +571,7 @@ func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	re, err := json.Marshal(orders_rls)
+	re, err := json.Marshal(OneOrdersRLS)
 	if err != nil {
 		log.Printf("Error in Marshalling", err)
 		internalServerError(w, "Marshalling Error")
@@ -521,4 +581,139 @@ func (db *DBPooler) HandleGInvoiceRLS(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write(re)
 
+}
+
+// these thing should focus on giving the {} but the orders should come under clubbing
+// example  if these rows belong to these particular invoice , then they should come in single {}
+// for that we should have that
+func (db *DBPooler) HandleGetAllOrders(w http.ResponseWriter, req *http.Request) {
+	user_id, err := JWTAuthCheck(w, req)
+	if err != nil && user_id == -1 {
+		//Response already being called by function
+		return //just exit normally here
+	}
+
+	// joining some thing with  invoice_id_first = invoice_id_second , will not make thing nicer i think
+	// i can have this like where order by would happen and each row would come  whenever  we got the diffefrenmt then and allshit
+	query_str := `SELECT 
+	public_invoice_id
+	json_agg(
+		json_body_object(
+		'product_name',product_name,
+		'quantity',quantity,
+		'price',price 
+		)
+	) as  items ,
+	sum(price * quantity) as total_amount from orders 
+	where user_id = $1 group by public_invoice_id;
+	`
+
+	var response AllOrdersResponse
+	ctx := req.Context()
+	rows, err := db.dbPool.Query(ctx, query_str, user_id)
+	if err != nil {
+		log.Printf("[Get-All Orders] Query Failed : %v", err)
+		internalServerError(w, "")
+		return
+	}
+
+	for rows.Next() {
+		var order SingleOrdersResponse
+
+		if err := rows.Scan(&order.InvoiceId, &order.Order, &order.TotalAmount); err != nil {
+			log.Printf("[Get-All Orders] Scanning Failed : %v", err)
+			internalServerError(w, "")
+			return
+		}
+		response.Orders = append(response.Orders, order)
+	}
+	response.Count = len(response.Orders)
+
+	ret_all_orders, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Json Marshalling Error :%v", err)
+		internalServerError(w, "Marshalling  Error ")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(ret_all_orders)
+}
+
+func (db *DBPooler) HandleGetAllOrdersRLS(w http.ResponseWriter, req *http.Request) {
+	userID, err := JWTAuthCheck(w, req)
+	if err != nil && userID == -1 {
+		//Response already being called by function
+		return //just exit normally here
+	}
+
+	ctx := req.Context()
+
+	// we need to send the all in the {} manner man
+	tx, err := db.dbPool.Begin(ctx)
+	if err != nil {
+		log.Printf("Error in initialization of Transaction : %v", err)
+		internalServerError(w, "")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Set User Context (No invoice_id set -> Allows fetching ALL invoices for this user)
+	_, err = tx.Exec(ctx, "SET LOCAL app.current_user_id = $1", userID)
+	if err != nil {
+		log.Printf("Error in Setting setting namespace :  %v", err)
+		internalServerError(w, "")
+		return
+	}
+	query_str := `SELECT 
+	invoice_id,
+	json_agg(
+		json_body_object(
+		'product_name',product_name
+		'quantity',quantity
+		'price',price
+		)
+	) AS  items , 
+	SUM(price * quantity) as total_amount
+	FROM orders 
+	group by invoice_id order by invoice_id DESC;
+	`
+
+	rows, err := tx.Query(ctx, query_str)
+	if err != nil {
+		log.Printf("Query Failure: %v", err)
+		internalServerError(w, "")
+		return
+	}
+
+	var response AllOrdersRlsResponse
+	for rows.Next() {
+		var order SingleOrdersRlsResponse
+		if err := rows.Scan(&order.InvoiceId, &order.Order, &order.TotalAmount); err != nil {
+			log.Printf("Error in Scanning : %v", err)
+			internalServerError(w, "")
+			return
+		}
+		response.Orders = append(response.Orders, order)
+	}
+
+	response.Count = len(response.Orders)
+
+	ret_all_orders, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Json Marshalling Error :%v", err)
+		internalServerError(w, "Marshalling  Error ")
+		return
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		log.Printf("Failed Execution of The Transaction: %v", err)
+		internalServerError(w, "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(ret_all_orders)
 }
