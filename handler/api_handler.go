@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -41,6 +42,10 @@ type OrderDet struct {
 	ProductName string  `json:"product_name"`
 	Quantity    int     `json:"quantity"`
 	Price       float32 `json:"price"`
+}
+
+type SingleOrderInsert struct {
+	Orders []OrderDet `json:"items"`
 }
 
 type SingleOrdersResponse struct {
@@ -107,7 +112,7 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(&user_det)
 	if err != nil {
 		log.Println("JSON Decoder Error : %v", err)
-		internalServerError(w, "JSON Decoding Problem")
+		internalServerError(w, "Invalid JSON")
 		return
 	}
 
@@ -148,7 +153,7 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	hashedPassword, err := hashPassword(user_det.Passsword)
 	if err != nil {
-		log.Printf("Error in hashing", err)
+		log.Printf("Error in hashing : %v", err)
 		internalServerError(w, "")
 		return
 	}
@@ -157,7 +162,7 @@ func (db *DBPooler) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	query := `INSERT into users (username, email, hashed_password) VALUES ($1, $2, $3)`
 	cmd_tag, err := db.dbPool.Exec(ctx, query, user_det.Username, user_det.Email, hashedPassword)
 	if err != nil || cmd_tag.RowsAffected() == 0 {
-		log.Printf("Insertion Failed", err)
+		log.Printf("Insertion Failed : %v", err)
 		internalServerError(w, "")
 		return
 	}
@@ -286,7 +291,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det []OrderDet
+	var order_det SingleOrderInsert
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -301,7 +306,7 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det {
+	for _, order := range order_det.Orders {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -325,12 +330,28 @@ func (db *DBPooler) HandleOrders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	ctx := r.Context()
+
+	tx, err := db.dbPool.Begin(ctx)
+	if err != nil {
+		log.Printf("Error in initialization of Transaction : %v", err)
+		internalServerError(w, "")
+		return
+	}
+	defer tx.Rollback(ctx)
+
 	//creation of th uuid for the use, which can be more unique unguessable , and pack whole order in one invoice_id
 	public_invoice_id := uuid.New()
-	err = db.invoiceDbCommit(context.Background(), order_det, int(user_id), public_invoice_id)
-
+	err = db.invoiceDbCommit(ctx, tx, order_det.Orders, int(user_id), public_invoice_id)
 	if err != nil { // insertion Failure mostly
-		log.Println("Insertion Failure [Orders]")
+		log.Println("Insertion Failure [Orders] : %v", err)
+		internalServerError(w, "")
+		return
+	}
+
+	err = tx.Commit(ctx)
+	if err != nil {
+		log.Printf("Failed Execution of The Transaction: %v", err)
 		internalServerError(w, "")
 		return
 	}
@@ -351,7 +372,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
-	var order_det []OrderDet
+	var order_det SingleOrderInsert
 
 	if err := json.NewDecoder(r.Body).Decode(&order_det); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -366,7 +387,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	//  - Price cant be negative
 	//  - Product name must be all char no number
 
-	for _, order := range order_det {
+	for _, order := range order_det.Orders {
 		if order.Quantity < 0 || order.Quantity > 10 {
 
 			ret_json := response("BAD_REQUEST", 400, "Incorrect Quantity")
@@ -390,18 +411,40 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// getting the request based context then startinmg new root one,  cause if something happen on network and delay or something
+	// it will be easily managed by that ..
+	ctx := r.Context()
+
 	// Getting the invoice_id of the orders_rls (which is beeing  the sequence  object start with 1000) and for every
 	// whole order bunch to get  the new  single invoice we are using this and allshit
-	var invoice_id int
-	query_str := `SELECT nextval(invoice_id_seq) ;`
-	err = db.dbPool.QueryRow(context.Background(), query_str).Scan(invoice_id)
+	var invoice_id int64
+	query_str := `SELECT nextval('invoice_id_seq');`
+	err = db.dbPool.QueryRow(context.Background(), query_str).Scan(&invoice_id)
+	fmt.Printf("%d", invoice_id)
 	if err != nil {
 		log.Printf("Querying 'invoice_id_seq' Failed: %v", err)
+		return
 	}
 
-	err = db.invoiceDbCommitRLS(context.Background(), order_det, int(user_id), invoice_id)
+	tx, err := db.dbPool.Begin(ctx)
 	if err != nil {
-		log.Println("Insertion Failure [Orders_RLS] ")
+		log.Printf("Error in initialization of Transaction : %v", err)
+		internalServerError(w, "")
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	err = db.invoiceDbCommitRLS(context.Background(), tx, order_det.Orders, int(user_id), invoice_id)
+	if err != nil {
+		log.Printf("Insertion Failure [Orders_RLS] : %v", err)
+		internalServerError(w, "")
+		return
+	}
+
+	// checking that whole transaction worked out or not
+	err = tx.Commit(ctx)
+	if err != nil {
+		log.Printf("Failed Execution of The Transaction: %v", err)
 		internalServerError(w, "")
 		return
 	}

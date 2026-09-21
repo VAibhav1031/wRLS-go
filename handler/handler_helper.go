@@ -32,22 +32,22 @@ func NewAuthTracker() *AuthTracker {
 		store: cache.New(blockedTime, 30*time.Second),
 	}
 }
-func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_id int, publicInvoiceID uuid.UUID) error {
+func (w *DBPooler) invoiceDbCommit(ctx context.Context, tx pgx.Tx, orders []OrderDet, user_id int, publicInvoiceID uuid.UUID) error {
 
 	bt := &pgx.Batch{}
 
 	for _, order := range orders {
 
-		bt.Queue(`INSERT into orders (user_id, public_invoice_id, product_name, price, quantity) VALUES ($1,$2,$3,$4,$5)`, user_id, publicInvoiceID, order.ProductName, order.Price, order.Quantity)
+		bt.Queue(`INSERT into orders (user_id, public_invoice_id, product_name, price, quantity) VALUES ($1,$2,$3,$4,$5);`, user_id, publicInvoiceID, order.ProductName, order.Price, order.Quantity)
 	}
 
-	results := w.dbPool.SendBatch(ctx, bt)
+	results := tx.SendBatch(ctx, bt)
 	defer results.Close()
 
 	for range orders {
 		insertTag, err := results.Exec()
 		if err != nil {
-			log.Printf("[InvoiceDBCommit]: Insertion Failed :", err)
+			log.Printf("[InvoiceDBCommit]: Insertion Failed : %v", err)
 			return err
 		}
 		if insertTag.RowsAffected() != 1 {
@@ -63,24 +63,28 @@ func (w *DBPooler) invoiceDbCommit(ctx context.Context, orders []OrderDet, user_
 
 }
 
-func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, orders []OrderDet, user_id int, invoice_id int) error {
+func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, tx pgx.Tx, orders []OrderDet, user_id int, invoiceID int64) error {
 
 	bt := &pgx.Batch{}
+	query := fmt.Sprintf("SET LOCAL app.current_invoice_id = '%d'", invoiceID)
+	_, err := tx.Exec(ctx, query)
+	if err != nil {
+		return fmt.Errorf("[InvoiceDBCommit-RLS]: Failed to set local RLS context : %v", err)
+	}
 
-	bt.Queue(`SET LOCAL app.current_invoice_id = $1`, invoice_id)
 	// setting the role as the app_user for this
 	for _, order := range orders {
 
-		bt.Queue(`INSERT into orders (user_id, product_name, price, quantity) VALUES ($1,$2,$3,$4)`, user_id, order.ProductName, order.Price, order.Quantity)
+		bt.Queue(`INSERT into orders_rls (user_id,invoice_id, product_name, price, quantity) VALUES ($1,$2,$3,$4,$5);`, user_id, invoiceID, order.ProductName, order.Price, order.Quantity)
 	}
 
-	results := w.dbPool.SendBatch(ctx, bt)
+	results := tx.SendBatch(ctx, bt)
 	defer results.Close()
 
-	for i := 0; i < len(orders); i++ {
+	for range orders {
 		insertTag, err := results.Exec()
 		if err != nil {
-			log.Printf("[InvoiceDBCommit-RLS]: Insertion Failed", err)
+			log.Printf("[InvoiceDBCommit-RLS]: Insertion Failed : %v", err)
 			return err
 		}
 		if insertTag.RowsAffected() != 1 {
@@ -151,7 +155,6 @@ func jwtVerifcation(tkn_str string) (float64, bool) {
 
 	if err != nil || !token.Valid {
 
-		fmt.Println(token, token.Valid)
 		log.Printf("Token is Expired or Invalid", err)
 		return -1, false
 	}
