@@ -81,7 +81,7 @@ ALTER TABLE orders_rls ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orders_rls_policy on orders_rls FOR ALL  TO app_user 
 USING(
    
-    user_id = NULLIF(current_setting('app.currrent_user_id',true),'')::INT
+    user_id = NULLIF(current_setting('app.current_user_id',true),'')::INT
     AND
     (
         NULLIF(current_setting('app.current_invoice_id',true),'') IS NULL
@@ -89,8 +89,10 @@ USING(
     )
 )
 WITH CHECK (
-    invoice_id = NULLIF(current_setting('app.current_invoice_id',true), '')::INT
+    user_id = NULLIF(current_setting('app.current_user_id', true), '')::INT
+    AND invoice_id = NULLIF(current_setting('app.current_invoice_id', true), '')::INT
 );
+
 
 -- Restrictive Maintenance Mode Emergency Brake
 CREATE POLICY enforce_maintenance_policy ON orders_rls 

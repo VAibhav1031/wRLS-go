@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -66,16 +67,25 @@ func (w *DBPooler) invoiceDbCommit(ctx context.Context, tx pgx.Tx, orders []Orde
 func (w *DBPooler) invoiceDbCommitRLS(ctx context.Context, tx pgx.Tx, orders []OrderDet, user_id int, invoiceID int64) error {
 
 	bt := &pgx.Batch{}
-	query := fmt.Sprintf("SET LOCAL app.current_invoice_id = '%d'", invoiceID)
-	_, err := tx.Exec(ctx, query)
+
+	userIDStr := strconv.Itoa(user_id)
+	invoiceIDStr := strconv.FormatInt(invoiceID, 10)
+	_, err := tx.Exec(ctx, `
+		SELECT 
+			set_config('app.current_user_id',$1,true),
+			set_config('app.current_invoice_id',$2,true);
+			
+	`, userIDStr, invoiceIDStr)
+
 	if err != nil {
-		return fmt.Errorf("[InvoiceDBCommit-RLS]: Failed to set local RLS context : %v", err)
+		return fmt.Errorf("[InvoiceDBCommit]: Failed to set local RLS context : %v", err)
+
 	}
 
 	// setting the role as the app_user for this
 	for _, order := range orders {
 
-		bt.Queue(`INSERT into orders_rls (user_id,invoice_id, product_name, price, quantity) VALUES ($1,$2,$3,$4,$5);`, user_id, invoiceID, order.ProductName, order.Price, order.Quantity)
+		bt.Queue(`INSERT into orders_rls (user_id,invoice_id, product_name, price, quantity) VALUES ($1, $2, $3, $4, $5);`, user_id, invoiceID, order.ProductName, order.Price, order.Quantity)
 	}
 
 	results := tx.SendBatch(ctx, bt)

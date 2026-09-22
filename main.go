@@ -18,7 +18,7 @@ func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	auth_tracker := handler.NewAuthTracker()
-	db_pool := handler.NewPooler(pool)
+	db_pool := handler.NewPooler(pool) // db Pool of connection creation
 	new_handler := handler.NewHandler(auth_tracker, db_pool)
 
 	mux.HandleFunc("POST /register", db_pool.HandleRegister)
@@ -29,12 +29,13 @@ func MuxServerHandler(pool *pgxpool.Pool) *http.ServeMux {
 	mux.HandleFunc("GET /invoice", db_pool.HandleGInvoiceRLS)
 	mux.HandleFunc("GET /orders", db_pool.HandleGetAllOrders)
 	mux.HandleFunc("GET /orderRLS", db_pool.HandleGetAllOrdersRLS)
+
 	return mux
 }
 
 func main() {
 
-	err := godotenv.Load() // loading .env file
+	err := godotenv.Load() // loading .env file (particular  in that session while running in terminal)
 	if err != nil {
 		log.Println("No .env file found, using system enviromentt ..")
 	}

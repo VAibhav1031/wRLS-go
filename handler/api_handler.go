@@ -419,8 +419,8 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	// whole order bunch to get  the new  single invoice we are using this and allshit
 	var invoice_id int64
 	query_str := `SELECT nextval('invoice_id_seq');`
-	err = db.dbPool.QueryRow(context.Background(), query_str).Scan(&invoice_id)
-	fmt.Printf("%d", invoice_id)
+	err = db.dbPool.QueryRow(ctx, query_str).Scan(&invoice_id)
+	fmt.Printf("%d\n", invoice_id)
 	if err != nil {
 		log.Printf("Querying 'invoice_id_seq' Failed: %v", err)
 		return
@@ -434,7 +434,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = db.invoiceDbCommitRLS(context.Background(), tx, order_det.Orders, int(user_id), invoice_id)
+	err = db.invoiceDbCommitRLS(ctx, tx, order_det.Orders, int(user_id), invoice_id)
 	if err != nil {
 		log.Printf("Insertion Failure [Orders_RLS] : %v", err)
 		internalServerError(w, "")
@@ -457,7 +457,7 @@ func (db *DBPooler) HandleOrdersRLS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (db *DBPooler) HandleGInvoiceShadow(w http.ResponseWriter, r *http.Request) {
-	// now this is basically the GET request with mapping
+	// now this is basically the GET request
 	user_id, err := JWTAuthCheck(w, r)
 	if err != nil && user_id == -1 {
 		//Response already being called by function
@@ -639,9 +639,9 @@ func (db *DBPooler) HandleGetAllOrders(w http.ResponseWriter, req *http.Request)
 	// joining some thing with  invoice_id_first = invoice_id_second , will not make thing nicer i think
 	// i can have this like where order by would happen and each row would come  whenever  we got the diffefrenmt then and allshit
 	query_str := `SELECT 
-	public_invoice_id
+	public_invoice_id,
 	json_agg(
-		json_body_object(
+		json_build_object(
 		'product_name',product_name,
 		'quantity',quantity,
 		'price',price 
@@ -702,23 +702,25 @@ func (db *DBPooler) HandleGetAllOrdersRLS(w http.ResponseWriter, req *http.Reque
 	defer tx.Rollback(ctx)
 
 	// 1. Set User Context (No invoice_id set -> Allows fetching ALL invoices for this user)
-	_, err = tx.Exec(ctx, "SET LOCAL app.current_user_id = $1", userID)
+	query := fmt.Sprintf("SET LOCAL app.current_user_id = '%d'", userID)
+	_, err = tx.Exec(ctx, query)
 	if err != nil {
 		log.Printf("Error in Setting setting namespace :  %v", err)
 		internalServerError(w, "")
 		return
 	}
+
 	query_str := `SELECT 
 	invoice_id,
 	json_agg(
-		json_body_object(
-		'product_name',product_name
-		'quantity',quantity
+		json_build_object(
+		'product_name',product_name,
+		'quantity',quantity,
 		'price',price
 		)
 	) AS  items , 
 	SUM(price * quantity) as total_amount
-	FROM orders 
+	FROM orders_rls 
 	group by invoice_id order by invoice_id DESC;
 	`
 
