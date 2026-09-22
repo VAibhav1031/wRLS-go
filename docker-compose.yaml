@@ -1,0 +1,38 @@
+service:
+  app:
+    build: .
+
+  ports:
+    - "127.0.0.1:9895:9895" 
+
+  env_file:
+      - .env
+
+  depends_on:
+    db:
+      condition: service_healthy
+
+    
+  db:
+    image: postgres:latest
+
+    ports:
+      - "5433:5432"
+    
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+   
+    volumes:
+      - app:/var/lib/postgresql/data
+      - ./path/to/your/script.sql:/docker-entrypoint-initdb.d/init.sql  # Mount your SQL script here
+
+    healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+
+volumes:
+  app:
